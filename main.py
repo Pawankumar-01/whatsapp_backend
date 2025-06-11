@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Depends, HTTPException, WebSocket,WebSocketDisconnect, status
+from fastapi import FastAPI, Request, Depends, HTTPException, WebSocket,WebSocketDisconnect, status ,Depends
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,8 +9,12 @@ from sqlalchemy.orm import aliased
 import crud, models
 from database import SessionLocal, engine
 from crud import get_last_messages_with_names
-from models import Message, Contact
+from models import Message, Contact, Template
 from sqlalchemy import desc
+from schemas import TemplateRead, ContactRead, TemplateCreate
+import requests
+import os
+
 
 
 
@@ -38,6 +42,7 @@ def get_db():
 @app.on_event("startup")
 def startup():
     models.Base.metadata.create_all(bind=engine)
+    
 
 
 
@@ -66,12 +71,23 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
                 
                 if "messages" in value:
                     for msg in value["messages"]:
+                        if "text" in msg:
+                            message_text = msg["text"]["body"]
+                        elif "image" in msg:
+                            message_text = f"(Image received: {msg['image'].get('caption', '')})"
+                        elif "audio" in msg:
+                            message_text = "(Audio message)"
+                        elif "document" in msg:
+                            message_text = f"(Document received: {msg['document'].get('filename', '')})"
+                        else:
+                            message_text = f"(Unsupported message type: {msg.get('type')})"
                         crud.create_message(
                             db,
                             sender=msg["from"],
                             receiver=metadata.get("display_phone_number"),
                             message=msg["text"]["body"],
-                            is_from_user=False,
+                            is_from_user=True, 
+                            
                         )
                 if "statuses" in value:
                     for status in value["statuses"]:
@@ -82,7 +98,7 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
                             message="(sent message)",
                             is_from_user=True,
                         )
-
+                    print("📥 Message from client:", msg["from"], message_text)
         return JSONResponse(content={"status": "received"}, status_code=200)
     except Exception as e:
         print("❌ Webhook error:", str(e))
@@ -189,7 +205,8 @@ def read_full_conversation(user_id: str, db: Session = Depends(get_db)):
             "receiver": m.receiver,
             "message": m.message,
             "timestamp": m.timestamp.isoformat(),
-            "from_user": m.is_from_user,
+            "is_from_user": m.is_from_user,
+            
         }
         for m in messages
     ]
@@ -198,3 +215,174 @@ def read_full_conversation(user_id: str, db: Session = Depends(get_db)):
 @app.get("/api/messages/last")
 def get_last_messages(db: Session = Depends(get_db)):
     return get_last_messages_with_names(db)
+
+
+
+
+
+
+class SendMessagePayload(BaseModel):
+    to: str
+    message: str
+
+WHATSAPP_TOKEN = "EAGlDSKINKB4BOxgz2Wy4VGpkKlbtwORbJEwJD9DVHhzIIK6BSCAZBVEjoNZA4Lp2jjP33rZCQIUQwVv9GxO8oF7WAfwprCTVVyC0IF712O2VdyxDLZCN6E9ZAiSW6fqVuaJr9UtGDXZAImx8dzGlgBMZB1RY0K0o19cjk6teAQBKioaGBALZAoilVXhBi2HfOXxQ4r0dPtiU6wAUdSsIUmi2P390vHOAvaRi5SQZD"
+PHONE_NUMBER_ID = "655560807644446"
+
+@app.post("/api/send-message")
+def send_message(payload: SendMessagePayload, db: Session = Depends(get_db)):
+    try:
+        print("📨 Payload received from frontend:", payload.dict())
+
+        cleaned_number = payload.to.strip().replace("+", "").replace(" ", "").replace("-", "")
+        print("📞 Cleaned recipient number:", cleaned_number)
+
+        # Store message in database
+        crud.create_message(
+            db=db,
+            sender="+15556566971",  # Your business number
+            receiver=payload.to,
+            message=payload.message,
+            is_from_user=True
+        )
+
+        headers = {
+            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        wa_payload = {
+            "messaging_product": "whatsapp",
+            "to": cleaned_number,
+            "type": "text",
+            "text": {
+                "body": payload.message
+            }
+        }
+
+        print("📤 Sending WhatsApp API request with payload:", wa_payload)
+
+        res = requests.post(
+            f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages",
+            headers=headers,
+            json=wa_payload
+        )
+
+        print("📬 WhatsApp API response status code:", res.status_code)
+        print("📬 WhatsApp API response body:", res.text)
+
+        response_data = res.json()
+
+        if res.status_code != 200:
+            print("❌ WhatsApp send failed with error:", response_data)
+            raise HTTPException(status_code=500, detail=response_data)
+
+        return {"status": "sent", "meta_response": response_data}
+
+    except Exception as e:
+        print(f"❌ Exception occurred while sending message: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+
+
+
+# Templates
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+@app.get("/api/templates", response_model=list[TemplateRead])
+def get_templates(db: Session = Depends(get_db)):
+    templates = db.query(Template).all()
+    return templates
+
+@app.post("/api/templates", response_model=TemplateRead)
+def create_template(template: TemplateCreate, db: Session = Depends(get_db)):
+    db_template = Template(content=template.content)
+    db.add(db_template)
+    db.commit()
+    db.refresh(db_template)
+    return db_template
+
+
+WHATSAPP_TOKEN = "EAGlDSKINKB4BOxgz2Wy4VGpkKlbtwORbJEwJD9DVHhzIIK6BSCAZBVEjoNZA4Lp2jjP33rZCQIUQwVv9GxO8oF7WAfwprCTVVyC0IF712O2VdyxDLZCN6E9ZAiSW6fqVuaJr9UtGDXZAImx8dzGlgBMZB1RY0K0o19cjk6teAQBKioaGBALZAoilVXhBi2HfOXxQ4r0dPtiU6wAUdSsIUmi2P390vHOAvaRi5SQZD"
+PHONE_NUMBER_ID = "655560807644446"
+
+
+@app.post("/api/templates/send")
+def send_template(data: dict, db: Session = Depends(get_db)):
+    try:
+        # Get the template content
+        template = db.query(Template).filter(Template.id == data["templateId"]).first()
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # Get the recipients
+        contacts = db.query(Contact).filter(Contact.id.in_(data["recipients"])).all()
+
+        for contact in contacts:
+            # Replace placeholders with actual values
+            personalized_content = template.content.replace("{{name}}", contact.name)
+
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": contact.phone,  # Must be in international format
+                "type": "text",
+                "text": {
+                    "body": personalized_content
+                }
+            }
+
+            headers = {
+                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                "Content-Type": "application/json"
+            }
+
+            # Send message
+            response = requests.post(
+                f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages",
+                json=payload,
+                headers=headers
+            )
+
+            if response.status_code != 200:
+                print(f"❌ Failed to send to {contact.phone}: {response.text}")
+
+        return {"message": "Messages sent successfully"}
+
+    except Exception as e:
+        print("❌ Error:", str(e))
+        raise HTTPException(status_code=500, detail="Failed to send messages")
+    
+
+@app.get("/api/templates", response_model=list[TemplateRead])
+def get_templates(db: Session = Depends(get_db)):
+    return db.query(Template).all()
+
+@app.post("/api/templates", response_model=TemplateRead)
+def create_template(template: TemplateCreate, db: Session = Depends(get_db)):
+    db_template = Template(content=template.content)
+    db.add(db_template)
+    db.commit()
+    db.refresh(db_template)
+    return db_template
+
+@app.post("/api/templates/send")
+def send_template(data: dict):
+    print(f"Send template {data['templateId']} to recipients {data['recipients']}")
+    # You can add actual WhatsApp logic here
+    return {"message": "Template sent (simulated)"}
+
+@app.delete("/api/templates/{template_id}")
+def delete_template(template_id: int, db: Session = Depends(get_db)):
+    template = db.query(Template).filter(Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    db.delete(template)
+    db.commit()
+    return {"message": "Template deleted successfully"}

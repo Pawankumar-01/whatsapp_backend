@@ -19,4 +19,10 @@ class Contact(Base):
     name = Column(String)
     phone = Column(String)
 
+    
 
+class Template(Base):
+    __tablename__ = "templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    content = Column(String, nullable=False)
