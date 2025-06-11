@@ -4,6 +4,7 @@ from sqlalchemy import or_, desc
 from datetime import datetime
 from schemas import ContactCreate
 from sqlalchemy import func
+import schemas
 
 
 def get_conversations(db: Session):
@@ -100,3 +101,21 @@ def get_last_messages_with_names(db: Session):
         }
         for msg, name in results
     ]
+
+
+
+
+
+
+def get_templates(db: Session):
+    return db.query(models.Template).all()
+
+def create_template(db: Session, template: schemas.TemplateCreate):
+    db_template = models.Template(content=template.content)
+    db.add(db_template)
+    db.commit()
+    db.refresh(db_template)
+    return db_template
+
+def get_contacts(db: Session):
+    return db.query(models.Contact).all()
